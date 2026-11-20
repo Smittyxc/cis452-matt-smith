@@ -177,6 +177,7 @@ int main(int argc, char *argv[]) {
   std::vector<char *> exec_args;
   int mref = 0;
   int pgfault = 0;
+  unsigned long long prev_page = 0;
 
   if (argc < 2) {
     std::cerr << "Insufficient arguments provided" << "\n";
@@ -247,16 +248,11 @@ int main(int argc, char *argv[]) {
 
     while (true) {
       pid_t who = wait(nullptr);
-      if (errno)
-        perror("After parent wait in loop");
-
       if (who == -1 || errno)
         break;
 
       // Get information about the current system call
       ptrace((__ptrace_request)PTRACE_GETREGS, ch_pid, nullptr, &user_regs);
-      if (errno)
-        perror("After GET_SYSCALL_INFO");
 
       unsigned long long page_num = user_regs.rip >> PAGE_SHIFT;
       bool is_page_fault = false;
@@ -279,20 +275,32 @@ int main(int argc, char *argv[]) {
         pgfault++;
       }
 
-      if (!quiet) {
-        if (verbose || is_page_fault) {
+      // Print formatting
+      bool page_shifted = (page_num != prev_page);
+      if (quiet) {
+        if (is_page_fault) {
+          std::cout << "Page Fault #" << pgfault << " at "
+                    << std::hex << user_regs.rip << std::dec << "\n";
+        }
+      } else {
+        if (page_shifted) {
           std::cout << "[" << std::dec << mref << "/" << pgfault << "] "
                     << "At: " << std::hex << user_regs.rip
-                    << " Page: " << page_num << std::dec << "\n";
-        } else {
+                    << " Page " << page_num << std::dec << "\n";
+        } else if (verbose) {
           std::cout << "[" << std::dec << mref << "/" << pgfault << "] "
                     << "At: " << std::hex << user_regs.rip << std::dec << "\n";
         }
       }
+      prev_page = page_num;
 
       ptrace((__ptrace_request)PTRACE_SINGLESTEP, ch_pid, nullptr, nullptr);
     }
-    std::cout << "From Parent" << std::endl;
+
+    // Sumary formatting
+    double fault_rate = (mref > 0) ? (static_cast<double>(pgfault) / mref) * 100.0 : 0.0;
+    std::cout << "Page Allocation: " << max_pages << ", RefCount: " << mref
+              << " Page Faults: " << pgfault << " (" << fault_rate << "%)\n";
   }
   return 0;
 }
