@@ -10,10 +10,50 @@
 #include <algorithm>
 #include <string>
 
+class Fifo {
+private:
+  int _capacity;
+  int count = 0;
+  int head = 0;
+  std::vector<unsigned long long> buffer;
+
+public:
+  Fifo(int capacity) {
+    _capacity = capacity;
+    buffer.resize(capacity);
+  }
+
+  void push(unsigned long long page) {
+    buffer[head] = page;
+    if (count < _capacity)
+      count++;
+    head = (head + 1) % _capacity;
+  }
+
+  bool handle_check(unsigned long long curr_page) {
+    bool hit = false;
+    for (int i = 0; i < count; i++) {
+      if (buffer[i] == curr_page) {
+        hit = true;
+        break;
+      }
+    }
+
+    if (!hit) {
+      push(curr_page);
+      return true;
+    }
+    return false;
+  }
+};
+
+class Lru {
+};
+
 int main(int argc, char *argv[]) {
   std::string policies[4] = {"lru", "fifo", "clock", "lfu"};
   bool quiet = false;
-  bool show_all = false;
+  bool verbose = false;
   int max_pages = 10;
   std::string policy = "";
   // std::string executable;
@@ -37,7 +77,7 @@ int main(int argc, char *argv[]) {
         return 1;
       };
     } else if (std::string(argv[i]) == "-v") {
-      show_all = true;
+      verbose = true;
     } else if (std::string(argv[i]) == "-p") {
       if (i + 1 < argc) {
         policy = argv[++i];
@@ -81,24 +121,19 @@ int main(int argc, char *argv[]) {
       std::cerr << "No executable provided" << "\n";
       return 1;
     }
+    exec_args.push_back(nullptr);
 
     execvp(exec_args[0], exec_args.data());
   } else {
-    // ptrace_syscall_info sc_info;
     user_regs_struct user_regs;
+    Fifo fifo = Fifo(max_pages);
 
     // Wait for the child to stop before starting to trace its system calls
     wait(nullptr);
-    perror("After first wait in parent");
 
-    ptrace((__ptrace_request)PTRACE_SETOPTIONS, ch_pid, nullptr, PTRACE_O_TRACESYSGOOD);
-    perror("After PTRACE_SETOPTIONS");
-
-    // Start tracing at the (first) system call of the child process
+    // Start tracing at every memory access
     ptrace((__ptrace_request)PTRACE_SINGLESTEP, ch_pid, nullptr, nullptr);
-    perror("After PTRACE_SYSCALL");
 
-    unsigned long long prev_page = 0;
     while (true) {
       pid_t who = wait(nullptr);
       if (errno)
@@ -114,24 +149,24 @@ int main(int argc, char *argv[]) {
         perror("After GET_SYSCALL_INFO");
 
       unsigned long long page_num = user_regs.rip >> PAGE_SHIFT;
-      if (!quiet) {
-        if (prev_page != page_num) {
-          pgfault++;
-        }
+      bool is_miss = fifo.handle_check(page_num);
+      mref++;
+      if (is_miss) {
+        pgfault++;
+      }
 
-        if (show_all || (prev_page != page_num)) {
-          std::cout << "[" << std::dec << ++mref << "/" << pgfault << "] "
+      if (!quiet) {
+        if (verbose || (is_miss)) {
+          std::cout << "[" << std::dec << mref << "/" << pgfault << "] "
                     << "At: " << std::hex << user_regs.rip
                     << " Page: " << page_num << std::dec << "\n";
         } else {
-          std::cout << "[" << std::dec << ++mref << "/" << pgfault << "] "
+          std::cout << "[" << std::dec << mref << "/" << pgfault << "] "
                     << "At: " << std::hex << user_regs.rip << std::dec << "\n";
         }
       }
 
-      prev_page = page_num;
-
-      ptrace((__ptrace_request)PTRACE_SYSCALL, ch_pid, nullptr, nullptr);
+      ptrace((__ptrace_request)PTRACE_SINGLESTEP, ch_pid, nullptr, nullptr);
     }
     std::cout << "From Parent" << std::endl;
   }
