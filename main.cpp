@@ -6,9 +6,11 @@
 #include <linux/ptrace.h>
 #include <sys/user.h>
 #include <vector>
-#include <charconv>
 #include <algorithm>
 #include <string>
+#include <list>
+#include <unordered_map>
+#include <climits>
 
 class Fifo {
 private:
@@ -22,7 +24,7 @@ public:
     _capacity = capacity;
     buffer.resize(capacity);
   }
-
+  // Circular buffer management
   void push(unsigned long long page) {
     buffer[head] = page;
     if (count < _capacity)
@@ -48,6 +50,82 @@ public:
 };
 
 class Lru {
+private:
+  int _capacity;
+  std::list<unsigned long long> buffer;
+
+public:
+  Lru(int capacity) {
+    _capacity = capacity;
+  }
+
+  bool handle_check(unsigned long long curr_page) {
+    // Check for hit
+    auto it = std::find(buffer.begin(), buffer.end(), curr_page);
+
+    if (it != buffer.end()) {
+      // Bring existing page to front (most recently accessed)
+      buffer.splice(buffer.begin(), buffer, it);
+      return false;
+    }
+
+    // Page fault
+    if (buffer.size() >= _capacity) {
+      buffer.pop_back();
+    }
+    buffer.push_front(curr_page);
+    return true;
+  }
+};
+
+struct Page_Node {
+  unsigned long long page_num;
+  int frequency;
+  int insert_time;
+};
+
+class Lfu {
+private:
+  int _capacity;
+  int iteration = 0;
+  std::unordered_map<unsigned long long, Page_Node> cache;
+
+public:
+  Lfu(int capacity) {
+    _capacity = capacity;
+  }
+
+  bool handle_check(unsigned long long page) {
+    auto it = cache.find(page);
+    // Hit -> increase freq.
+    if (it != cache.end()) {
+      it->second.frequency++;
+      return false;
+    }
+    Page_Node node = {page, 1, ++iteration};
+
+    // Miss -> eject by lfu, ties handled by FIFO
+    if (cache.size() >= _capacity) {
+      unsigned long long page_to_kick = 0;
+      int oldest_time = INT_MAX;
+      int least_frequency = INT_MAX;
+
+      for (const auto &entry : cache) {
+        if (entry.second.frequency < least_frequency) {
+          least_frequency = entry.second.frequency;
+          oldest_time = INT_MAX;
+        }
+        if (entry.second.frequency == least_frequency && entry.second.insert_time < oldest_time) {
+          oldest_time = entry.second.insert_time;
+          page_to_kick = entry.first;
+        }
+      }
+      cache.erase(page_to_kick);
+    }
+    cache.insert({page, node});
+
+    return true;
+  }
 };
 
 int main(int argc, char *argv[]) {
@@ -56,7 +134,6 @@ int main(int argc, char *argv[]) {
   bool verbose = false;
   int max_pages = 10;
   std::string policy = "";
-  // std::string executable;
   std::vector<char *> exec_args;
   int mref = 0;
   int pgfault = 0;
@@ -96,15 +173,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // std::cout << quiet << "\n";
-  // std::cout << show_all << "\n";
-  // std::cout << policy << "\n";
-  // std::cout << max_pages << "\n";
-
-  // for (const auto &num : exec_args) {
-  //   std::cout << num << " ";
-  // }
-
   if (policy == "") {
     std::cerr << "No policy provided";
     return 1;
@@ -127,6 +195,8 @@ int main(int argc, char *argv[]) {
   } else {
     user_regs_struct user_regs;
     Fifo fifo = Fifo(max_pages);
+    Lru lru = Lru(max_pages);
+    Lfu lfu = Lfu(max_pages);
 
     // Wait for the child to stop before starting to trace its system calls
     wait(nullptr);
@@ -144,19 +214,32 @@ int main(int argc, char *argv[]) {
 
       // Get information about the current system call
       ptrace((__ptrace_request)PTRACE_GETREGS, ch_pid, nullptr, &user_regs);
-
       if (errno)
         perror("After GET_SYSCALL_INFO");
 
       unsigned long long page_num = user_regs.rip >> PAGE_SHIFT;
-      bool is_miss = fifo.handle_check(page_num);
+      bool is_page_fault = false;
+
+      if (policy == "lru") {
+        is_page_fault = lru.handle_check(page_num);
+      } else if (policy == "fifo") {
+        is_page_fault = fifo.handle_check(page_num);
+      } else if (policy == "lfu") {
+        is_page_fault = lfu.handle_check(page_num);
+      } else if (policy == "clock") {
+        //
+      } else {
+        std::cerr << "No valid policy" << "\n";
+        return 1;
+      }
+
       mref++;
-      if (is_miss) {
+      if (is_page_fault) {
         pgfault++;
       }
 
       if (!quiet) {
-        if (verbose || (is_miss)) {
+        if (verbose || (is_page_fault)) {
           std::cout << "[" << std::dec << mref << "/" << pgfault << "] "
                     << "At: " << std::hex << user_regs.rip
                     << " Page: " << page_num << std::dec << "\n";
