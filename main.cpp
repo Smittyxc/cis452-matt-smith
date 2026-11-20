@@ -40,7 +40,6 @@ public:
         break;
       }
     }
-
     if (!hit) {
       push(curr_page);
       return true;
@@ -78,8 +77,7 @@ public:
   }
 };
 
-struct Page_Node {
-  unsigned long long page_num;
+struct Lfu_Node {
   int frequency;
   int insert_time;
 };
@@ -88,7 +86,7 @@ class Lfu {
 private:
   int _capacity;
   int iteration = 0;
-  std::unordered_map<unsigned long long, Page_Node> cache;
+  std::unordered_map<unsigned long long, Lfu_Node> cache;
 
 public:
   Lfu(int capacity) {
@@ -102,7 +100,7 @@ public:
       it->second.frequency++;
       return false;
     }
-    Page_Node node = {page, 1, ++iteration};
+    Lfu_Node node = {1, ++iteration};
 
     // Miss -> eject by lfu, ties handled by FIFO
     if (cache.size() >= _capacity) {
@@ -124,6 +122,48 @@ public:
     }
     cache.insert({page, node});
 
+    return true;
+  }
+};
+
+struct Clock_Node {
+  unsigned long long page;
+  bool referenced;
+};
+class Clock {
+private:
+  int _capacity;
+  int count = 0;
+  int index = 0;
+  std::vector<Clock_Node> buffer;
+
+public:
+  Clock(int capacity) {
+    _capacity = capacity;
+    buffer.resize(capacity);
+  }
+
+  bool handle_check(unsigned long long page) {
+    for (int i = 0; i < count; i++) {
+      if (buffer[i].page == page) {
+        buffer[i].referenced = true;
+        return false;
+      }
+    }
+
+    if (count >= _capacity) {
+      while (true) {
+        if (buffer[index].referenced == false) {
+          buffer[index] = {page, true};
+          index = (index + 1) % _capacity;
+          return true;
+        }
+        buffer[index].referenced = false;
+        index = (index + 1) % _capacity;
+      }
+    }
+
+    buffer[count++] = {page, true};
     return true;
   }
 };
@@ -197,6 +237,7 @@ int main(int argc, char *argv[]) {
     Fifo fifo = Fifo(max_pages);
     Lru lru = Lru(max_pages);
     Lfu lfu = Lfu(max_pages);
+    Clock clock = Clock(max_pages);
 
     // Wait for the child to stop before starting to trace its system calls
     wait(nullptr);
@@ -227,7 +268,7 @@ int main(int argc, char *argv[]) {
       } else if (policy == "lfu") {
         is_page_fault = lfu.handle_check(page_num);
       } else if (policy == "clock") {
-        //
+        is_page_fault = clock.handle_check(page_num);
       } else {
         std::cerr << "No valid policy" << "\n";
         return 1;
@@ -239,7 +280,7 @@ int main(int argc, char *argv[]) {
       }
 
       if (!quiet) {
-        if (verbose || (is_page_fault)) {
+        if (verbose || is_page_fault) {
           std::cout << "[" << std::dec << mref << "/" << pgfault << "] "
                     << "At: " << std::hex << user_regs.rip
                     << " Page: " << page_num << std::dec << "\n";
